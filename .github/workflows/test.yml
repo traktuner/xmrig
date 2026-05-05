@@ -1,45 +1,119 @@
-on: push
-
 name: Test builds
 
+on:
+  push:
+    branches:
+      - "**"
+    tags-ignore:
+      - "v*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CMAKE_BUILD_TYPE: Release
+  CMAKE_COMMON_ARGS: >-
+    -DWITH_MO_BENCHMARK=ON
+    -DWITH_OPENCL=OFF
+    -DWITH_CUDA=OFF
+
 jobs:
-  build_win:
-    name: Windows build
-    runs-on: windows-2025
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            runner: ubuntu-24.04
+            cmake_args: ""
+
+          - name: linux-x64-cascadelake
+            runner: ubuntu-24.04
+            cmake_args: >-
+              -DCMAKE_C_FLAGS_RELEASE="-Ofast -march=cascadelake -mtune=cascadelake"
+              -DCMAKE_CXX_FLAGS_RELEASE="-Ofast -s -march=cascadelake -mtune=cascadelake"
+
+          - name: macos-arm64
+            runner: macos-15
+            cmake_args: ""
+
+          - name: windows-x64
+            runner: windows-2025
+            cmake_args: ""
+
     defaults:
       run:
-        shell: msys2 {0}
+        shell: bash
+
     steps:
-      - name: Setup MSYS2 + UCRT64
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libuv1-dev libssl-dev libhwloc-dev
+
+      - name: Install macOS dependencies
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install cmake libuv openssl@3 hwloc
+
+      - name: Setup MSYS2
+        if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: UCRT64           # selects the UCRT64 environment
+          msystem: UCRT64
           update: true
-          install: >
+          install: >-
             base-devel
-            mingw-w64-ucrt-x86_64-toolchain
-            cmake
             git
-      - name: Checkout code
-        uses: actions/checkout@master
-      - name: Checkout deps
-        run:  git clone https://github.com/xmrig/xmrig-deps.git
-      - name: Build project on Windows
-        run: |
-          cmake . -G "Unix Makefiles" -DXMRIG_DEPS=./xmrig-deps/gcc/x64
-          make -j2
+            cmake
+            mingw-w64-ucrt-x86_64-toolchain
 
-  build_lin:
-    name: Ubuntu build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Prepare Ubuntu tools
+      - name: Checkout Windows dependencies
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: git clone --depth 1 https://github.com/xmrig/xmrig-deps.git
+
+      - name: Configure Linux
+        if: runner.os == 'Linux'
         run: |
-          sudo apt update
-          sudo apt install -y git build-essential cmake libuv1-dev libssl-dev libhwloc-dev
-      - name: Checkout code
-        uses: actions/checkout@master
-      - name: Build project on Ubuntu
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
+            ${CMAKE_COMMON_ARGS} \
+            ${{ matrix.cmake_args }}
+
+      - name: Configure macOS
+        if: runner.os == 'macOS'
         run: |
-          cmake .
-          make -j$(nproc)
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
+            -DOPENSSL_ROOT_DIR="$(brew --prefix openssl@3)" \
+            ${CMAKE_COMMON_ARGS} \
+            ${{ matrix.cmake_args }}
+
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          cmake -S . -B build -G "Unix Makefiles" \
+            -DCMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}" \
+            -DXMRIG_DEPS=./xmrig-deps/gcc/x64 \
+            ${CMAKE_COMMON_ARGS} \
+            ${{ matrix.cmake_args }}
+
+      - name: Build Unix
+        if: runner.os != 'Windows'
+        run: cmake --build build --parallel
+
+      - name: Build Windows
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: cmake --build build --parallel 2
